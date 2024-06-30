@@ -24,26 +24,25 @@ func decodeBencode(bencodedString string) (interface{}, error) {
 }
 
 func decodeString(bencodedString string) (string, error) {
-	var firstColonIndex int
-
-	for i := 0; i < len(bencodedString); i++ {
-		if bencodedString[i] == ':' {
-			firstColonIndex = i
-			break
-		}
+	// find length of string
+	lengthStr := 0
+	i := 0
+	for i < len(bencodedString) && bencodedString[i] >= '0' && bencodedString[i] <= '9' {
+		lengthStr = lengthStr*10 + int(bencodedString[i]) - '0'
+		i++
 	}
 
-	lengthStr := bencodedString[:firstColonIndex]
-
-	length, err := strconv.Atoi(lengthStr)
-	if err != nil {
-		return "", err
-	}
-	if firstColonIndex+1+length > len(bencodedString) {
-		return "", fmt.Errorf("index %d out of bounds as expected length is: %d but is: %d", length, firstColonIndex+1+length, len(bencodedString))
+	if i == len(bencodedString) || bencodedString[i] != ':' {
+		return "", fmt.Errorf("bad formatted string")
 	}
 
-	return bencodedString[firstColonIndex+1 : firstColonIndex+1+length], nil
+	i++
+
+	if i+lengthStr > len(bencodedString) {
+		return "", fmt.Errorf("index %d out of bounds for string length %d", i+lengthStr, len(bencodedString))
+	}
+
+	return bencodedString[i : i+lengthStr], nil
 }
 
 func decodeNumber(bencodedString string) (int, error) {

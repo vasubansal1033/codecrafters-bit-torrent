@@ -151,7 +151,8 @@ func decodeNumber(bencodedString string, st int) (int, int, error) {
 func main() {
 	command := os.Args[1]
 
-	if command == "decode" {
+	switch command {
+	case "decode":
 		bencodedValue := os.Args[2]
 
 		decoded, _, err := decodeBencode(bencodedValue, 0)
@@ -162,8 +163,26 @@ func main() {
 
 		jsonOutput, _ := json.Marshal(decoded)
 		fmt.Println(string(jsonOutput))
-	} else {
+	case "info":
+		data, err := os.ReadFile(os.Args[2])
+		if err != nil {
+			fmt.Printf("error: read file: %v\n", err)
+			os.Exit(1)
+		}
+
+		decoded, _, err := decodeDict(string(data), 0)
+		fmt.Printf("Tracker URL: %v\n", decoded["announce"])
+
+		info, ok := decoded["info"].(map[string]interface{})
+		if info == nil || !ok {
+			fmt.Printf("no info section\n")
+			return
+		}
+
+		fmt.Printf("Length: %v", info["length"])
+	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
+
 }

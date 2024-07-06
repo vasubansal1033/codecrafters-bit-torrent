@@ -13,6 +13,8 @@ import (
 // - 10:hello12345 -> hello12345
 func decodeBencode(bencodedString string, st int) (x interface{}, i int, err error) {
 	switch {
+	case rune(bencodedString[st]) == 'd':
+		return decodeDict(bencodedString, st)
 	case rune(bencodedString[st]) == 'l':
 		return decodeList(bencodedString, st)
 	case unicode.IsDigit(rune(bencodedString[st])):
@@ -22,6 +24,45 @@ func decodeBencode(bencodedString string, st int) (x interface{}, i int, err err
 	default:
 		return "", st, fmt.Errorf("unexpected value: %q", bencodedString[i])
 	}
+}
+
+func decodeDict(bencodedString string, st int) (m map[string]interface{}, i int, err error) {
+	i = st
+	i++
+
+	m = make(map[string]interface{})
+	for {
+		if i >= len(bencodedString) {
+			return nil, st, fmt.Errorf("bad formatted dictionary")
+		}
+
+		if bencodedString[i] == 'e' {
+			i++
+			break
+		}
+
+		pairSt := i
+		var key, val interface{}
+
+		key, i, err = decodeBencode(bencodedString, i)
+		if err != nil {
+			return nil, pairSt, err
+		}
+
+		k, ok := key.(string)
+		if !ok {
+			return nil, pairSt, fmt.Errorf("key is not a string")
+		}
+
+		val, i, err = decodeBencode(bencodedString, i)
+		if err != nil {
+			return nil, i, err
+		}
+
+		m[k] = val
+	}
+
+	return m, i, nil
 }
 
 func decodeList(bencodedString string, st int) (list []interface{}, i int, err error) {

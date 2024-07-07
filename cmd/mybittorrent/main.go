@@ -2,8 +2,14 @@ package main
 
 import (
 	"crypto/sha1"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"unicode"
 
@@ -13,6 +19,28 @@ import (
 // Example:
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
+
+type ParsedTorrentFile struct {
+	trackerUrl string
+	infoHash   string
+	info       TorrentInfo
+}
+
+type TorrentInfo struct {
+	length      int
+	pieceLength int
+	pieces      []string
+}
+
+type TrackerResponse struct {
+	interval int    `json:"interval"`
+	peers    string `json:"peers"`
+}
+
+type Peer struct {
+	IP   net.IP
+	Port uint16
+}
 
 func decodeBencode(bencodedString string, st int) (x interface{}, i int, err error) {
 	switch {
@@ -173,44 +201,130 @@ func main() {
 			os.Exit(1)
 		}
 
-		decoded, _, err := decodeDict(string(data), 0)
+		parsedTorrentFile, err := parseTorrentFile(data)
 		if err != nil {
 			panic(err)
 		}
 
-		fmt.Printf("Tracker URL: %v\n", decoded["announce"])
-
-		info, ok := decoded["info"].(map[string]interface{})
-		if info == nil || !ok {
-			fmt.Printf("no info section\n")
-			return
-		}
-
-		fmt.Printf("Length: %v\n", info["length"])
-
-		h := sha1.New()
-		if err := bencode.Marshal(h, info); err != nil {
-			panic(err)
-		}
-
-		fmt.Printf("Info Hash: %x\n", h.Sum(nil))
-		fmt.Printf("Piece Length: %v\n", info["piece length"])
-
+		fmt.Printf("Tracker URL: %v\n", parsedTorrentFile.trackerUrl)
+		fmt.Printf("Length: %v\n", parsedTorrentFile.info.length)
+		fmt.Printf("Info Hash: %v\n", parsedTorrentFile.infoHash)
+		fmt.Printf("Piece Length: %v\n", parsedTorrentFile.info.pieceLength)
 		fmt.Println("Piece Hashes:")
-		pieces, err := getPieces(info["pieces"])
+		pieces := parsedTorrentFile.info.pieces
 		if err != nil {
 			panic(err)
 		}
 
 		for _, piece := range pieces {
-			fmt.Printf("%x\n", piece)
+			fmt.Printf("%v\n", piece)
+		}
+	case "peers":
+		data, err := os.ReadFile(os.Args[2])
+		if err != nil {
+			fmt.Printf("error: read file: %v\n", err)
+			os.Exit(1)
 		}
 
+		parsedTorrentFile, err := parseTorrentFile(data)
+		if err != nil {
+			panic(err)
+		}
+
+		hexDecodedHash, err := hex.DecodeString(parsedTorrentFile.infoHash)
+		if err != nil {
+			panic(err)
+		}
+
+		params := url.Values{}
+		params.Add("info_hash", string(hexDecodedHash))
+		params.Add("peer_id", "00112233445566778899")
+		params.Add("port", "6881")
+		params.Add("uploaded", "0")
+		params.Add("downloaded", "0")
+		params.Add("left", fmt.Sprintf("%v", parsedTorrentFile.info.length))
+		params.Add("compact", "1")
+
+		finalUrl := fmt.Sprintf("%s?%s", parsedTorrentFile.trackerUrl, params.Encode())
+		res, err := http.Get(finalUrl)
+		if err != nil {
+			panic(err)
+		}
+
+		defer res.Body.Close()
+		resBytes, err := io.ReadAll(res.Body)
+		if err != nil {
+			panic(err)
+		}
+
+		m, _, err := decodeDict(string(resBytes), 0)
+		if err != nil {
+			panic(err)
+		}
+
+		peers, err := parsePeers(m["peers"].(string))
+		if err != nil {
+			panic(err)
+		}
+
+		for _, peer := range peers {
+			fmt.Printf("%v:%v\n", peer.IP, peer.Port)
+		}
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
 
+}
+
+func parsePeers(peers string) ([]Peer, error) {
+	const peerSize = 6
+	if len(peers)%peerSize != 0 {
+		return nil, fmt.Errorf("peers string has incorrect length")
+	}
+
+	var result []Peer
+	for i := 0; i < len(peers); i += peerSize {
+		ip := net.IP(peers[i : i+4])
+		port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
+		result = append(result, Peer{IP: ip, Port: port})
+	}
+
+	return result, nil
+}
+
+func parseTorrentFile(data []byte) (ParsedTorrentFile, error) {
+	decoded, _, err := decodeDict(string(data), 0)
+	if err != nil {
+		panic(err)
+	}
+
+	info, ok := decoded["info"].(map[string]interface{})
+	if info == nil || !ok {
+		return ParsedTorrentFile{}, fmt.Errorf("no info section")
+	}
+
+	h := sha1.New()
+	if err := bencode.Marshal(h, info); err != nil {
+		panic(err)
+	}
+
+	pieces, err := getPieces(info["pieces"])
+	if err != nil {
+		panic(err)
+	}
+
+	parsedTorrent := ParsedTorrentFile{
+		trackerUrl: decoded["announce"].(string),
+		infoHash:   fmt.Sprintf("%x", h.Sum(nil)),
+		info: TorrentInfo{
+			length:      info["length"].(int),
+			pieceLength: info["piece length"].(int),
+			pieces:      pieces,
+		},
+	}
+
+	return parsedTorrent, nil
 }
 
 func getPieces(pieceI interface{}) (pieces []string, err error) {
@@ -225,7 +339,7 @@ func getPieces(pieceI interface{}) (pieces []string, err error) {
 
 	i := 0
 	for i < len(pieceHash) {
-		pieces = append(pieces, pieceHash[i:i+20])
+		pieces = append(pieces, fmt.Sprintf("%x", pieceHash[i:i+20]))
 		i += 20
 	}
 

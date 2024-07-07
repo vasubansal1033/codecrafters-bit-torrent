@@ -1,16 +1,19 @@
 package main
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"os"
 	"unicode"
-	// bencode "github.com/jackpal/bencode-go" // Available if you need it!
+
+	bencode "github.com/jackpal/bencode-go" // Available if you need it!
 )
 
 // Example:
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
+
 func decodeBencode(bencodedString string, st int) (x interface{}, i int, err error) {
 	switch {
 	case rune(bencodedString[st]) == 'd':
@@ -171,6 +174,10 @@ func main() {
 		}
 
 		decoded, _, err := decodeDict(string(data), 0)
+		if err != nil {
+			panic(err)
+		}
+
 		fmt.Printf("Tracker URL: %v\n", decoded["announce"])
 
 		info, ok := decoded["info"].(map[string]interface{})
@@ -179,7 +186,14 @@ func main() {
 			return
 		}
 
-		fmt.Printf("Length: %v", info["length"])
+		fmt.Printf("Length: %v\n", info["length"])
+
+		h := sha1.New()
+		if err := bencode.Marshal(h, info); err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Info Hash: %x\n", h.Sum(nil))
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)

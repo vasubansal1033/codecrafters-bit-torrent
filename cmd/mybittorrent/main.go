@@ -194,9 +194,40 @@ func main() {
 		}
 
 		fmt.Printf("Info Hash: %x\n", h.Sum(nil))
+		fmt.Printf("Piece Length: %v\n", info["piece length"])
+
+		fmt.Println("Piece Hashes:")
+		pieces, err := getPieces(info["pieces"])
+		if err != nil {
+			panic(err)
+		}
+
+		for _, piece := range pieces {
+			fmt.Printf("%x\n", piece)
+		}
+
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
 
+}
+
+func getPieces(pieceI interface{}) (pieces []string, err error) {
+	pieceHash, ok := pieceI.(string)
+	if !ok {
+		return []string{}, fmt.Errorf("error while converting pieceHash to string")
+	}
+
+	if len(pieceHash)%20 != 0 {
+		return []string{}, fmt.Errorf("invalid pieces hash")
+	}
+
+	i := 0
+	for i < len(pieceHash) {
+		pieces = append(pieces, pieceHash[i:i+20])
+		i += 20
+	}
+
+	return pieces, nil
 }

@@ -270,6 +270,50 @@ func main() {
 		for _, peer := range peers {
 			fmt.Printf("%v:%v\n", peer.IP, peer.Port)
 		}
+	case "handshake":
+		data, err := os.ReadFile(os.Args[2])
+		if err != nil {
+			fmt.Printf("error: read file: %v\n", err)
+			os.Exit(1)
+		}
+
+		parsedTorrentFile, err := parseTorrentFile(data)
+		if err != nil {
+			panic(err)
+		}
+
+		hexDecodedHash, err := hex.DecodeString(parsedTorrentFile.infoHash)
+		if err != nil {
+			panic(err)
+		}
+
+		peerAddress := os.Args[3]
+		conn, err := net.Dial("tcp", peerAddress)
+		if err != nil {
+			panic(err)
+		}
+
+		defer conn.Close()
+
+		handshakeMessage := []byte{}
+		handshakeMessage = append(handshakeMessage, byte(19))
+		handshakeMessage = append(handshakeMessage, []byte("BitTorrent protocol")...)
+		handshakeMessage = append(handshakeMessage, make([]byte, 8)...)
+		handshakeMessage = append(handshakeMessage, hexDecodedHash...)
+		handshakeMessage = append(handshakeMessage, []byte("00112233445566778899")...)
+
+		_, err = conn.Write(handshakeMessage)
+		if err != nil {
+			panic(err)
+		}
+
+		buff := make([]byte, 68)
+		_, err = conn.Read(buff)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Peer ID: %x\n", string(buff[48:]))
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)

@@ -522,10 +522,18 @@ func downloadPiece(conn net.Conn, parsedTorrentFile ParsedTorrentFile, index int
 		}
 
 		// pieceMessage.payload.index = payloadMessageBytes[1:1]
-		pieceMessage.payload.offset = binary.BigEndian.Uint32(payloadMessageBytes[1:5])
-		pieceMessage.payload.length = binary.BigEndian.Uint32(payloadMessageBytes[5:9])
+		downloadedPieceIndex := binary.BigEndian.Uint32(payloadMessageBytes[1:5])
+		downloadedPieceOffset := binary.BigEndian.Uint32(payloadMessageBytes[5:9])
 
+		fmt.Println(downloadedPieceIndex, downloadedPieceOffset)
 		data = append(data, payloadMessageBytes[9:]...)
+	}
+
+	downloadedDataHash := fmt.Sprintf("%x", sha1.Sum(data))
+
+	if downloadedDataHash != parsedTorrentFile.info.pieces[index] {
+		fmt.Println(downloadedDataHash, parsedTorrentFile.infoHash)
+		panic(fmt.Errorf("downloaded data hash doesn't match with info hash in torrent file"))
 	}
 
 	return data

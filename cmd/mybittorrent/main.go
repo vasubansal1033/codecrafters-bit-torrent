@@ -33,8 +33,11 @@ type TorrentInfo struct {
 }
 
 type TrackerResponse struct {
-	interval int    `json:"interval"`
-	peers    string `json:"peers"`
+	Complete    int    `json:"complete"`
+	Incomplete  int    `json:"incomplete"`
+	Interval    int    `json:"interval"`
+	MinInterval int    `json:"min interval"`
+	Peers       string `json:"peers"`
 }
 
 type Peer struct {
@@ -236,36 +239,18 @@ func main() {
 			panic(err)
 		}
 
-		params := url.Values{}
-		params.Add("info_hash", string(hexDecodedHash))
-		params.Add("peer_id", "00112233445566778899")
-		params.Add("port", "6881")
-		params.Add("uploaded", "0")
-		params.Add("downloaded", "0")
-		params.Add("left", fmt.Sprintf("%v", parsedTorrentFile.info.length))
-		params.Add("compact", "1")
+		finalUrl := getPeerDiscoveryUrl(
+			string(hexDecodedHash),
+			"00112233445566778899",
+			"6881",
+			"0",
+			"0",
+			parsedTorrentFile.info.length,
+			"1",
+			parsedTorrentFile.trackerUrl,
+		)
 
-		finalUrl := fmt.Sprintf("%s?%s", parsedTorrentFile.trackerUrl, params.Encode())
-		res, err := http.Get(finalUrl)
-		if err != nil {
-			panic(err)
-		}
-
-		defer res.Body.Close()
-		resBytes, err := io.ReadAll(res.Body)
-		if err != nil {
-			panic(err)
-		}
-
-		m, _, err := decodeDict(string(resBytes), 0)
-		if err != nil {
-			panic(err)
-		}
-
-		peers, err := parsePeers(m["peers"].(string))
-		if err != nil {
-			panic(err)
-		}
+		peers := performPeerDiscovery(finalUrl)
 
 		for _, peer := range peers {
 			fmt.Printf("%v:%v\n", peer.IP, peer.Port)
@@ -287,6 +272,12 @@ func main() {
 			panic(err)
 		}
 
+		handshakeMessage := getHandshakeMessage(
+			"BitTorrent protocol",
+			hexDecodedHash,
+			"00112233445566778899",
+		)
+
 		peerAddress := os.Args[3]
 		conn, err := net.Dial("tcp", peerAddress)
 		if err != nil {
@@ -295,23 +286,7 @@ func main() {
 
 		defer conn.Close()
 
-		handshakeMessage := []byte{}
-		handshakeMessage = append(handshakeMessage, byte(19))
-		handshakeMessage = append(handshakeMessage, []byte("BitTorrent protocol")...)
-		handshakeMessage = append(handshakeMessage, make([]byte, 8)...)
-		handshakeMessage = append(handshakeMessage, hexDecodedHash...)
-		handshakeMessage = append(handshakeMessage, []byte("00112233445566778899")...)
-
-		_, err = conn.Write(handshakeMessage)
-		if err != nil {
-			panic(err)
-		}
-
-		buff := make([]byte, 68)
-		_, err = conn.Read(buff)
-		if err != nil {
-			panic(err)
-		}
+		buff := performHandshake(conn, handshakeMessage)
 
 		fmt.Printf("Peer ID: %x\n", string(buff[48:]))
 	default:
@@ -319,6 +294,95 @@ func main() {
 		os.Exit(1)
 	}
 
+}
+
+func performHandshake(
+	conn net.Conn,
+	handshakeMessage []byte,
+) []byte {
+	_, err := conn.Write(handshakeMessage)
+	if err != nil {
+		panic(err)
+	}
+
+	buff := make([]byte, 68)
+	_, err = conn.Read(buff)
+	if err != nil {
+		panic(err)
+	}
+
+	return buff
+}
+
+func getHandshakeMessage(
+	protocol string,
+	hexDecodedHash []byte,
+	peerId string,
+) []byte {
+	handshakeMessage := []byte{}
+	handshakeMessage = append(handshakeMessage, byte(len(protocol)))
+	handshakeMessage = append(handshakeMessage, []byte(protocol)...)
+	handshakeMessage = append(handshakeMessage, make([]byte, 8)...)
+	handshakeMessage = append(handshakeMessage, hexDecodedHash...)
+	handshakeMessage = append(handshakeMessage, []byte(peerId)...)
+
+	return handshakeMessage
+}
+
+func performPeerDiscovery(finalUrl string) []Peer {
+	res, err := http.Get(finalUrl)
+	if err != nil {
+		panic(err)
+	}
+
+	defer res.Body.Close()
+	resBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		panic(err)
+	}
+
+	m, _, err := decodeDict(string(resBytes), 0)
+	if err != nil {
+		panic(err)
+	}
+
+	trackerResponse := TrackerResponse{
+		Complete:    m["complete"].(int),
+		Incomplete:  m["incomplete"].(int),
+		Interval:    m["interval"].(int),
+		MinInterval: m["min interval"].(int),
+		Peers:       m["peers"].(string),
+	}
+
+	peers, err := parsePeers(trackerResponse.Peers)
+	if err != nil {
+		panic(err)
+	}
+
+	return peers
+}
+
+func getPeerDiscoveryUrl(
+	hexDecodedHash string,
+	peerId string, port string,
+	uploaded string,
+	downloaded string,
+	infoLength int,
+	compact string,
+	trackerUrl string,
+) string {
+	params := url.Values{}
+	params.Add("info_hash", string(hexDecodedHash))
+	params.Add("peer_id", peerId)
+	params.Add("port", port)
+	params.Add("uploaded", uploaded)
+	params.Add("downloaded", downloaded)
+	params.Add("left", fmt.Sprintf("%v", infoLength))
+	params.Add("compact", compact)
+
+	finalUrl := fmt.Sprintf("%s?%s", trackerUrl, params.Encode())
+
+	return finalUrl
 }
 
 func parsePeers(peers string) ([]Peer, error) {

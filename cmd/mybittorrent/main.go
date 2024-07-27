@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"unicode"
 
 	bencode "github.com/jackpal/bencode-go" // Available if you need it!
@@ -44,6 +47,35 @@ type Peer struct {
 	IP   net.IP
 	Port uint16
 }
+
+type PeerMessage struct {
+	messageLength uint32
+	messageId     uint8
+	payload       PeerMessagePayload
+}
+
+type PeerMessagePayload struct {
+	index  uint32
+	offset uint32
+	length uint32
+}
+
+type HandshakeMessage struct {
+	Length        int
+	Protocol      string
+	ReservedBytes [8]byte
+	InfoHash      string
+	PeerId        string
+}
+
+const (
+	BIT_FIELD_MESSAGE_ID  = 5
+	INTERESTED_MESSAGE_ID = 2
+	UNCHOKE_MESSAGE_ID    = 1
+	BLOCK_SIZE            = 16 * 1024
+	REQUEST_MESSAGE_ID    = 6
+	PIECE_MESSAGE_ID      = 7
+)
 
 func decodeBencode(bencodedString string, st int) (x interface{}, i int, err error) {
 	switch {
@@ -272,11 +304,12 @@ func main() {
 			panic(err)
 		}
 
-		handshakeMessage := getHandshakeMessage(
-			"BitTorrent protocol",
-			hexDecodedHash,
-			"00112233445566778899",
-		)
+		handshakeMessage := HandshakeMessage{
+			Length:   19,
+			Protocol: "BitTorrent protocol",
+			InfoHash: string(hexDecodedHash),
+			PeerId:   "00112233445566778899",
+		}
 
 		peerAddress := os.Args[3]
 		conn, err := net.Dial("tcp", peerAddress)
@@ -286,20 +319,222 @@ func main() {
 
 		defer conn.Close()
 
-		buff := performHandshake(conn, handshakeMessage)
+		handShakeResponse := performHandshake(conn, handshakeMessage.getBytes())
 
-		fmt.Printf("Peer ID: %x\n", string(buff[48:]))
+		fmt.Printf("Peer ID: %s\n", handShakeResponse.PeerId)
+
+	case "download_piece":
+		var torrentFile, outputPath string
+		if os.Args[2] == "-o" {
+			torrentFile = os.Args[4]
+			outputPath = os.Args[3]
+		} else {
+			torrentFile = os.Args[2]
+			outputPath = "."
+		}
+
+		data, err := os.ReadFile(torrentFile)
+		if err != nil {
+			fmt.Printf("error: read file: %v\n", err)
+			os.Exit(1)
+		}
+
+		parsedTorrentFile, err := parseTorrentFile(data)
+		if err != nil {
+			panic(err)
+		}
+
+		hexDecodedHash, err := hex.DecodeString(parsedTorrentFile.infoHash)
+		if err != nil {
+			panic(err)
+		}
+
+		handshakeMessage := HandshakeMessage{
+			Length:   19,
+			Protocol: "BitTorrent protocol",
+			InfoHash: string(hexDecodedHash),
+			PeerId:   "00112233445566778899",
+		}
+
+		finalUrl := getPeerDiscoveryUrl(
+			string(hexDecodedHash),
+			"00112233445566778899",
+			"6881",
+			"0",
+			"0",
+			parsedTorrentFile.info.length,
+			"1",
+			parsedTorrentFile.trackerUrl,
+		)
+
+		peers := performPeerDiscovery(finalUrl)
+
+		peerAddress := fmt.Sprintf("%s:%d", peers[0].IP.String(), peers[0].Port)
+		conn, err := net.Dial("tcp", peerAddress)
+		if err != nil {
+			panic(err)
+		}
+
+		defer conn.Close()
+
+		_ = performHandshake(conn, handshakeMessage.getBytes())
+
+		pieceIndex, _ := strconv.Atoi(os.Args[5])
+		downloadedPiece := downloadPiece(conn, parsedTorrentFile, pieceIndex)
+
+		file, err := os.Create(outputPath)
+		if err != nil {
+			panic(err)
+		}
+
+		defer file.Close()
+
+		_, err = file.Write(downloadedPiece)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Piece downloaded to %s.\n", outputPath)
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
+}
 
+func downloadPiece(conn net.Conn, parsedTorrentFile ParsedTorrentFile, index int) []byte {
+	// wait for bitfield message (id = 5)
+	peerMessage := PeerMessage{}
+
+	peerMessageLengthBytes := make([]byte, 4)
+
+	_, err := conn.Read(peerMessageLengthBytes)
+	if err != nil {
+		panic(err)
+	}
+
+	peerMessage.messageLength = binary.BigEndian.Uint32(peerMessageLengthBytes)
+
+	peerMessageIdBytes := make([]byte, peerMessage.messageLength)
+	_, err = conn.Read(peerMessageIdBytes)
+	if err != nil {
+		panic(err)
+	}
+
+	peerMessage.messageId = peerMessageIdBytes[0]
+	if peerMessage.messageId != BIT_FIELD_MESSAGE_ID {
+		panic(fmt.Errorf("expected bitfield message"))
+	}
+
+	// send an interested message (id=2)
+	_, err = conn.Write([]byte{0, 0, 0, 1, INTERESTED_MESSAGE_ID})
+	if err != nil {
+		panic(err)
+	}
+
+	// wait for unchoke message(id=1)
+	unchokeMessage := PeerMessage{}
+	unchokeMessageLengthBytes := make([]byte, 4)
+
+	_, err = conn.Read(unchokeMessageLengthBytes)
+	if err != nil {
+		panic(err)
+	}
+
+	unchokeMessage.messageLength = binary.BigEndian.Uint32(unchokeMessageLengthBytes)
+
+	unchokeMessageIdBytes := make([]byte, unchokeMessage.messageLength)
+
+	_, err = conn.Read(unchokeMessageIdBytes)
+	if err != nil {
+		panic(err)
+	}
+
+	unchokeMessage.messageId = unchokeMessageIdBytes[0]
+
+	if unchokeMessage.messageId != UNCHOKE_MESSAGE_ID {
+		panic(fmt.Errorf("expected unchoke message"))
+	}
+
+	// download piece
+	fileLength := parsedTorrentFile.info.length
+	pieceLength := parsedTorrentFile.info.pieceLength
+
+	pieceCnt := int(math.Ceil(float64(fileLength) / float64(pieceLength)))
+	if index == pieceCnt-1 {
+		pieceLength = fileLength % pieceLength
+	}
+
+	blockCnt := int(math.Ceil(float64(pieceLength) / float64(BLOCK_SIZE)))
+	fmt.Printf("File Length: %d, Piece Length: %d, Piece Count: %d, Block Size: %d, Block Count: %d\n", fileLength, pieceLength, pieceCnt, BLOCK_SIZE, blockCnt)
+
+	data := []byte{}
+	for i := 0; i < blockCnt; i++ {
+		blockLength := BLOCK_SIZE
+		if i == blockCnt-1 {
+			blockLength = pieceLength - ((blockCnt - 1) * BLOCK_SIZE)
+		}
+
+		fmt.Println(i, blockLength)
+
+		peerMessage := PeerMessage{
+			messageLength: 13,
+			messageId:     REQUEST_MESSAGE_ID,
+			payload: PeerMessagePayload{
+				index:  uint32(index),
+				offset: uint32(i * BLOCK_SIZE),
+				length: uint32(blockLength),
+			},
+		}
+
+		var buff bytes.Buffer
+		binary.Write(&buff, binary.BigEndian, peerMessage)
+
+		_, err := conn.Write(buff.Bytes())
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println("Sent request message", peerMessage)
+
+		// wait for piece message
+		pieceMessage := PeerMessage{}
+		pieceMessageLengthBytes := make([]byte, 4)
+		_, err = conn.Read(pieceMessageLengthBytes)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			panic(err)
+		}
+
+		pieceMessage.messageLength = binary.BigEndian.Uint32(pieceMessageLengthBytes)
+
+		payloadMessageBytes := make([]byte, pieceMessage.messageLength)
+		_, err = io.ReadFull(conn, payloadMessageBytes)
+		if err != nil {
+			panic(err)
+		}
+
+		pieceMessage.messageId = payloadMessageBytes[0]
+		if pieceMessage.messageId != PIECE_MESSAGE_ID {
+			panic(fmt.Errorf("expected piece message, received %d", pieceMessage.messageId))
+		}
+
+		// pieceMessage.payload.index = payloadMessageBytes[1:1]
+		pieceMessage.payload.offset = binary.BigEndian.Uint32(payloadMessageBytes[1:5])
+		pieceMessage.payload.length = binary.BigEndian.Uint32(payloadMessageBytes[5:9])
+
+		data = append(data, payloadMessageBytes[9:]...)
+	}
+
+	return data
 }
 
 func performHandshake(
 	conn net.Conn,
 	handshakeMessage []byte,
-) []byte {
+) HandshakeMessage {
 	_, err := conn.Write(handshakeMessage)
 	if err != nil {
 		panic(err)
@@ -311,20 +546,24 @@ func performHandshake(
 		panic(err)
 	}
 
-	return buff
+	protocolLength := int(buff[0])
+	handShakeResponse := HandshakeMessage{
+		Length:   protocolLength,
+		Protocol: string(buff[1 : 1+protocolLength]),
+		InfoHash: fmt.Sprintf("%x", buff[1+protocolLength:48]),
+		PeerId:   fmt.Sprintf("%x", buff[48:68]),
+	}
+
+	return handShakeResponse
 }
 
-func getHandshakeMessage(
-	protocol string,
-	hexDecodedHash []byte,
-	peerId string,
-) []byte {
+func (h *HandshakeMessage) getBytes() []byte {
 	handshakeMessage := []byte{}
-	handshakeMessage = append(handshakeMessage, byte(len(protocol)))
-	handshakeMessage = append(handshakeMessage, []byte(protocol)...)
+	handshakeMessage = append(handshakeMessage, byte(h.Length))
+	handshakeMessage = append(handshakeMessage, []byte(h.Protocol)...)
 	handshakeMessage = append(handshakeMessage, make([]byte, 8)...)
-	handshakeMessage = append(handshakeMessage, hexDecodedHash...)
-	handshakeMessage = append(handshakeMessage, []byte(peerId)...)
+	handshakeMessage = append(handshakeMessage, h.InfoHash...)
+	handshakeMessage = append(handshakeMessage, []byte(h.PeerId)...)
 
 	return handshakeMessage
 }

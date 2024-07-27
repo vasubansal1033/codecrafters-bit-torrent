@@ -441,7 +441,7 @@ func main() {
 
 		peers := performPeerDiscovery(finalUrl)
 
-		peerAddress := fmt.Sprintf("%s:%d", peers[1].IP.String(), peers[1].Port)
+		peerAddress := fmt.Sprintf("%s:%d", peers[2].IP.String(), peers[2].Port)
 
 		file, err := os.Create(outputPath)
 		if err != nil {
@@ -598,10 +598,9 @@ func downloadPiece(conn net.Conn, parsedTorrentFile ParsedTorrentFile, index int
 		}
 
 		// pieceMessage.payload.index = payloadMessageBytes[1:1]
-		downloadedPieceIndex := binary.BigEndian.Uint32(payloadMessageBytes[1:5])
-		downloadedPieceOffset := binary.BigEndian.Uint32(payloadMessageBytes[5:9])
+		// downloadedPieceIndex := binary.BigEndian.Uint32(payloadMessageBytes[1:5])
+		// downloadedPieceOffset := binary.BigEndian.Uint32(payloadMessageBytes[5:9])
 
-		fmt.Println(downloadedPieceIndex, downloadedPieceOffset)
 		data = append(data, payloadMessageBytes[9:]...)
 	}
 

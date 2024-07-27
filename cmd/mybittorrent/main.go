@@ -395,6 +395,84 @@ func main() {
 		}
 
 		fmt.Printf("Piece downloaded to %s.\n", outputPath)
+	case "download":
+		var torrentFile, outputPath string
+		if os.Args[2] == "-o" {
+			torrentFile = os.Args[4]
+			outputPath = os.Args[3]
+		} else {
+			torrentFile = os.Args[2]
+			outputPath = "."
+		}
+
+		data, err := os.ReadFile(torrentFile)
+		if err != nil {
+			fmt.Printf("error: read file: %v\n", err)
+			os.Exit(1)
+		}
+
+		parsedTorrentFile, err := parseTorrentFile(data)
+		if err != nil {
+			panic(err)
+		}
+
+		hexDecodedHash, err := hex.DecodeString(parsedTorrentFile.infoHash)
+		if err != nil {
+			panic(err)
+		}
+
+		handshakeMessage := HandshakeMessage{
+			Length:   19,
+			Protocol: "BitTorrent protocol",
+			InfoHash: string(hexDecodedHash),
+			PeerId:   "00112233445566778899",
+		}
+
+		finalUrl := getPeerDiscoveryUrl(
+			string(hexDecodedHash),
+			"00112233445566778899",
+			"6881",
+			"0",
+			"0",
+			parsedTorrentFile.info.length,
+			"1",
+			parsedTorrentFile.trackerUrl,
+		)
+
+		peers := performPeerDiscovery(finalUrl)
+
+		peerAddress := fmt.Sprintf("%s:%d", peers[1].IP.String(), peers[1].Port)
+
+		file, err := os.Create(outputPath)
+		if err != nil {
+			panic(err)
+		}
+
+		defer file.Close()
+
+		numPieces := len(parsedTorrentFile.info.pieces)
+		for pieceIndex := 0; pieceIndex < numPieces; pieceIndex++ {
+			fmt.Printf("Downloading piece %d\n", pieceIndex)
+
+			fmt.Println("Performing handshake")
+			conn, err := net.Dial("tcp", peerAddress)
+			if err != nil {
+				panic(err)
+			}
+
+			_ = performHandshake(conn, handshakeMessage.getBytes())
+
+			downloadedPiece := downloadPiece(conn, parsedTorrentFile, pieceIndex)
+			_, err = file.Write(downloadedPiece)
+			if err != nil {
+				panic(err)
+			}
+
+			fmt.Printf("Piece downloaded to %s.\n", outputPath)
+			fmt.Println("Closing connection.")
+			conn.Close()
+		}
+
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
@@ -473,8 +551,6 @@ func downloadPiece(conn net.Conn, parsedTorrentFile ParsedTorrentFile, index int
 		if i == blockCnt-1 {
 			blockLength = pieceLength - ((blockCnt - 1) * BLOCK_SIZE)
 		}
-
-		fmt.Println(i, blockLength)
 
 		peerMessage := PeerMessage{
 			messageLength: 13,
